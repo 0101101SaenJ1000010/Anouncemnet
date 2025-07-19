@@ -12,26 +12,37 @@ seen_links = set()
 BOT_TOKEN = '8165623622:AAGIPRrU5rdX4EmNUFT_IDvHDGjuMpWQAI0'
 CHAT_ID = '5501599635'
 
+session = requests.Session()
 headers = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 }
 
-def send_telegram_message(message):
-    try:
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-        data = {"chat_id": CHAT_ID, "text": message, "parse_mode": "HTML"}
-        requests.post(url, data=data, timeout=5)
-    except Exception as e:
-        print(f"[Telegram Error] {e}")
+def send_telegram_message(message, retries=3):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    data = {"chat_id": CHAT_ID, "text": message, "parse_mode": "HTML"}
 
-def fetch_rss_feed():
-    try:
-        response = requests.get(FEED_URL, headers=headers, timeout=10)
-        response.raise_for_status()
-        return response.content
-    except Exception as e:
-        print(f"[Error] Fetch failed: {e}")
-        return None
+    for attempt in range(retries):
+        try:
+            response = session.post(url, data=data, timeout=10)
+            if response.status_code == 200:
+                return True
+            else:
+                print(f"[{datetime.now()}] Telegram Error {response.status_code}: {response.text}")
+        except Exception as e:
+            print(f"[{datetime.now()}] Telegram Exception: {e}")
+        time.sleep(2)
+    return False
+
+def fetch_rss_feed(retries=3):
+    for attempt in range(retries):
+        try:
+            response = session.get(FEED_URL, headers=headers, timeout=15)
+            response.raise_for_status()
+            return response.content
+        except Exception as e:
+            print(f"[{datetime.now()}] RSS Fetch Error (try {attempt+1}): {e}")
+            time.sleep(2)
+    return None
 
 def extract_attachment_link(description):
     if ".pdf" in description:
@@ -41,8 +52,12 @@ def extract_attachment_link(description):
     return "N/A"
 
 def parse_and_display(xml):
-    root = ET.fromstring(xml)
-    items = root.findall(".//item")
+    try:
+        root = ET.fromstring(xml)
+        items = root.findall(".//item")
+    except Exception as e:
+        print(f"[{datetime.now()}] XML Parse Error: {e}")
+        return
 
     for item in items:
         title = item.findtext("title", default="N/A").strip()
@@ -63,7 +78,6 @@ def parse_and_display(xml):
         print(f"🔗 Update link     : {link}")
         print(f"📎 Attachment link : {attachment}")
         print(f"🧾 NSE Feed        : {FEED_NAME}")
-        print(f"📘 Other Info      : _")
         print(f"[{FEED_NAME}]\n")
 
         message = (
@@ -76,19 +90,23 @@ def parse_and_display(xml):
         )
         send_telegram_message(message)
 
-def watch():
-    print("📡 Live monitoring NSE RSS feed...\n")
+def resilient_watch_loop():
+    print("📡 Starting resilient RSS monitoring...\n")
     while True:
-        xml = fetch_rss_feed()
-        if xml:
-            parse_and_display(xml)
-        time.sleep(120)
+        try:
+            while True:
+                xml = fetch_rss_feed()
+                if xml:
+                    parse_and_display(xml)
+                time.sleep(120)
+        except Exception as e:
+            print(f"[{datetime.now()}] ❌ Script crashed: {e}. Restarting in 10 seconds...")
+            time.sleep(10)
 
-# Dummy web server to keep Railway active
 def run_dummy_server():
     server = HTTPServer(('0.0.0.0', 8080), SimpleHTTPRequestHandler)
     server.serve_forever()
 
 if __name__ == "__main__":
-    threading.Thread(target=watch, daemon=True).start()
+    threading.Thread(target=resilient_watch_loop, daemon=True).start()
     run_dummy_server()
